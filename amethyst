@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Comando `amethyst` — wrapper: `amethyst web` avvia il localhost.
+# Uso:
+#   chmod +x amethyst
+#   ./amethyst web [--port 3000] [--no-open]
+#   ./amethyst help
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+cmd="${1:-web}"
+case "$cmd" in
+  web|serve|start)
+    shift || true
+    exec python3 "$HERE/amethyst-web" web "$@"
+    ;;
+  help|-h|--help)
+    echo "Uso: amethyst web [--port PORTA] [--no-open]"
+    echo "     amethyst-web [--port PORTA]   (comando diretto, stesso effetto)"
+    echo ""
+    echo "Esempi:"
+    echo "  ./amethyst web              # apre http://127.0.0.1:8080"
+    echo "  ./amethyst web --port 3000  # porta personalizzata"
+    echo "  ./amethyst-web --no-open    # senza apertura automatica"
+    ;;
+  *)
+    echo "Comando sconosciuto: $cmd" >&2
+    echo "Uso: amethyst web [--port PORTA]" >&2
+    exit 1
+    ;;
+esac
