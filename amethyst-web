@@ -1,0 +1,552 @@
+#!/usr/bin/env python3
+"""
+Amethyst Web — comando eseguibile localhost per giocare da browser.
+
+Uso dopo il download:
+    chmod +x amethyst-web
+    ./amethyst-web              # avvia e apre il gioco in browser
+    ./amethyst-web web          # uguale (alias: `amethyst web`)
+    ./amethyst-web --port 3000 # porta personalizzata
+    ./amethyst-web --no-open    # non aprire il browser in automatico
+
+Cosa fa:
+  - apre un server SOLO locale (127.0.0.1, niente fuori)
+  - il browser si apre su /play: un clone voxel open-source
+    giocabile subito, senza installare nulla, senza account.
+  - NON è Minecraft originale Mojang (quello richiede gioco
+    acquistato + Amethyst Launcher). Per il gioco completo vedi /launcher.
+
+Compatibile con: Termux (Android), Linux, macOS, Windows.
+Dipendenze server: solo Python 3 stdlib. Niente pip install.
+Gioco: Three.js via CDN (serve internet al primo avvio).
+"""
+import argparse
+import functools
+import json
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse
+
+APP_NAME = "Amethyst Web"
+VERSION = "2.0.0"
+PKG_RELEASE = "org.angelauramc.amethyst"
+PKG_DEBUG = "org.angelauramc.amethyst.debug"
+MAIN_ACTIVITY = "net.kdt.pojavlaunch.MainActivity"
+DEFAULT_PORT = 8080
+DEFAULT_HOST = "127.0.0.1"
+
+PAGE_HOME = """<!DOCTYPE html>
+<html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Amethyst Web — localhost</title>
+<style>
+:root{color-scheme:dark;--bg:#0d1117;--card:#161b22;--acc:#a371f7;--acc2:#39c5cf;--txt:#e6edf3;--mut:#8b949e}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:radial-gradient(1000px 500px at 50% -10%,#2a1a4d,transparent),var(--bg);color:var(--txt);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{max-width:620px;width:100%;background:var(--card);border:1px solid #30363d;border-radius:20px;padding:32px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.logo{font-size:52px}.h1{font-size:28px;margin:8px 0 4px}.sub{color:var(--mut);margin:0 0 20px}
+.btn{display:block;width:100%;margin:10px 0;padding:15px;border-radius:12px;font-size:18px;font-weight:700;text-decoration:none;border:0;cursor:pointer}
+.play{background:linear-gradient(135deg,var(--acc),var(--acc2));color:#0d1117}
+.ghost{background:#21262d;color:var(--txt);border:1px solid #30363d;font-size:15px;font-weight:600}
+.row{display:flex;gap:10px}.row .btn{margin:5px 0}
+.url{background:#0d1117;border:1px dashed #484f58;border-radius:10px;padding:10px;margin:14px 0;font-family:monospace;color:var(--acc2);word-break:break-all}
+.small{color:var(--mut);font-size:13px;margin-top:14px}
+.status{display:inline-block;font-size:13px;background:#238636;color:#fff;border-radius:99px;padding:4px 12px;margin-bottom:8px}
+</style></head><body><div class="card">
+<div class="logo">💜⛏️</div>
+<div class="status">● localhost attivo</div>
+<h1 class="h1">Amethyst Web</h1>
+<p class="sub">Gioca subito dal browser, senza installare nulla.<br>Clone voxel open-source dimostrativo (non Minecraft Mojang).</p>
+<div class="url">__URL__/play</div>
+<a class="btn play" href="/play">▶ &nbsp;Gioca ora nel browser</a>
+<div class="row">
+<a class="btn ghost" href="/launcher">🚀 Minecraft originale (app)</a>
+<a class="btn ghost" href="/api/status">📡 Stato JSON</a>
+</div>
+<div class="row">
+<a class="btn ghost" href="https://nightly.link/AngelAuraMC/Amethyst-Android/workflows/android/v3_openjdk/app-debug%20%28recommended%29.zip">📥 Scarica APK</a>
+<a class="btn ghost" href="https://wiki.angelauramc.dev/">📖 Wiki</a>
+</div>
+<p class="small">Per chiudere: terminale → <b>CTRL+C</b>.<br><b>amethyst web</b> · solo rete locale.</p>
+</div></body></html>"""
+
+PAGE_LAUNCHER = """<!DOCTYPE html>
+<html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Minecraft originale — Amethyst Web</title>
+<style>
+:root{color-scheme:dark}:root{--bg:#0d1117;--card:#161b22;--acc:#a371f7;--acc2:#39c5cf;--txt:#e6edf3;--mut:#8b949e}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--txt);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{max-width:620px;width:100%;background:var(--card);border:1px solid #30363d;border-radius:20px;padding:32px}
+.btn{display:block;width:100%;margin:10px 0;padding:15px;border-radius:12px;font-size:18px;font-weight:700;text-decoration:none;border:0;cursor:pointer;text-align:center}
+.play{background:linear-gradient(135deg,var(--acc),var(--acc2));color:#0d1117}
+.ghost{background:#21262d;color:var(--txt);border:1px solid #30363d;font-size:15px}
+ol{line-height:1.8}code{background:#0d1117;padding:2px 8px;border-radius:6px;font-size:14px}
+.msg{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:12px;margin:12px 0;display:none}
+a.back{color:var(--mut);font-size:14px}
+</style></head><body><div class="card">
+<a class="back" href="/">← Pannello</a> · <a class="back" href="/play">▶ Gioca nel browser</a>
+<h1>⛏️ Minecraft originale</h1>
+<p>Possiedi Minecraft: Java Edition? Usa l'app Amethyst completa:</p>
+<ol>
+<li>Installa l'<b>APK Amethyst</b> (una sola volta).</li>
+<li>Premi il bottone qui sotto (solo Android).</li>
+<li>Accedi → <b>Play</b> → gioca alla versione completa.</li>
+</ol>
+<button class="btn play" onclick="launch()">🚀 Apri Amethyst Launcher ora</button>
+<div class="msg" id="msg"></div>
+<a class="btn ghost" href="https://nightly.link/AngelAuraMC/Amethyst-Android/workflows/android/v3_openjdk/app-debug%20%28recommended%29.zip">📥 Scarica APK</a>
+<script>
+async function launch(){
+  const m=document.getElementById('msg');m.style.display='block';m.textContent='⏳ Tento di aprire Amethyst...';
+  try{
+    const r=await fetch('/api/launch');const j=await r.json();
+    m.textContent=(j.ok?'✅ ':'⚠️ ')+j.message;
+  }catch(e){m.textContent='⚠️ Server irraggiungibile. Apri manualmente l\u2019app Amethyst.';}
+}
+</script>
+</div></body></html>"""
+
+# Gioco voxel open-source (nostro codice, zero asset Mojang).
+# Three.js caricato da CDN; il mondo è generato proceduralmente.
+PAGE_PLAY = """<!DOCTYPE html>
+<html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Gioca — Amethyst Web</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;background:#87ceeb;font-family:system-ui,sans-serif;touch-action:none}
+#c{position:fixed;inset:0;display:block}
+#hud{position:fixed;top:0;left:0;right:0;padding:8px;display:flex;gap:8px;align-items:center;justify-content:space-between;pointer-events:none;z-index:5}
+.pill{background:rgba(0,0,0,.55);color:#fff;border-radius:99px;padding:6px 12px;font-size:13px;pointer-events:auto;text-decoration:none}
+#cross{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);color:#fff;font-size:22px;text-shadow:0 0 4px #000;z-index:4;pointer-events:none}
+#hotbar{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);display:flex;gap:6px;z-index:5}
+.slot{width:52px;height:52px;border-radius:10px;border:2px solid rgba(255,255,255,.4);background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:11px;color:#fff;text-align:center;line-height:1.1;user-select:none}
+.slot.sel{border-color:#ffd60a;box-shadow:0 0 10px #ffd60a}
+#btns{position:fixed;bottom:74px;right:10px;display:flex;flex-direction:column;gap:8px;z-index:5}
+.abtn{width:62px;height:62px;border-radius:50%;border:0;background:rgba(0,0,0,.55);color:#fff;font-size:24px}
+#joy{position:fixed;bottom:74px;left:10px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.15);border:2px solid rgba(255,255,255,.4);z-index:5;display:none}
+#stick{position:absolute;left:35px;top:35px;width:50px;height:50px;border-radius:50%;background:rgba(255,255,255,.6)}
+#menu{position:fixed;inset:0;background:rgba(10,10,20,.88);color:#fff;display:flex;align-items:center;justify-content:center;z-index:10;padding:20px}
+#menu .box{max-width:520px;background:#161b22;border:1px solid #30363d;border-radius:16px;padding:26px;text-align:center}
+#menu h1{margin:0 0 6px}#menu p{color:#aaa;font-size:14px}
+#go{background:linear-gradient(135deg,#a371f7,#39c5cf);border:0;border-radius:10px;padding:14px 20px;font-size:18px;font-weight:800;width:100%;cursor:pointer}
+.warn{background:#3a2b00;border:1px solid #8a6d00;color:#ffd60a;border-radius:8px;padding:8px;font-size:12px;margin:10px 0}
+kbd{background:#333;border-radius:4px;padding:1px 6px;font-size:12px}
+</style></head><body>
+<canvas id="c"></canvas>
+<div id="hud">
+<a class="pill" href="/">← Amethyst Web</a>
+<span class="pill" id="info">⛏️ carica…</span>
+<a class="pill" href="/launcher">🚀 Gioco completo</a>
+</div>
+<div id="cross">+</div>
+<div id="hotbar"></div>
+<div id="btns">
+<button class="abtn" id="bJump">⤒</button>
+<button class="abtn" id="bBreak">⛏</button>
+<button class="abtn" id="bPlace">🧱</button>
+</div>
+<div id="joy"><div id="stick"></div></div>
+<div id="menu"><div class="box">
+<h1>💜⛏️ Amethyst Web Play</h1>
+<p>Clone voxel <b>open-source dimostrativo</b> — creato da zero, <b>nessun asset Mojang</b>.<br>
+Il Minecraft originale richiede gioco acquistato + app (vedi <a href="/launcher" style="color:#39c5cf">Gioco completo</a>).</p>
+<div class="warn">🌐 Serve internet al primo avvio (Three.js da CDN). Mondo salvato in questo browser.</div>
+<p>PC: <kbd>WASD</kbd> muovi · mouse guarda · <kbd>Spazio</kbd> salta · click rompe · tasto destro piazza · <kbd>1-6</kbd> blocchi<br>
+📱 Mobile: joystick + trascina per guardare + tasti ⤒ ⛏ 🧱</p>
+<button id="go">▶ GIOCA ORA</button>
+</div></div>
+<script>
+(function(){
+if(typeof THREE==='undefined'){
+  document.getElementById('info').textContent='⚠️ Three.js non caricato: controlla internet e ricarica.';
+  document.getElementById('go').textContent='RIPROVA (serve internet per Three.js)';
+  document.getElementById('go').onclick=function(){location.reload();};
+  return;
+}
+// ---------- mondo ----------
+var SIZE=32, blocks={};
+function h(x,z){return Math.floor(4+2.6*Math.sin(x*0.42)*Math.cos(z*0.38)+1.4*Math.sin(x*0.16+z*0.21));}
+function key(x,y,z){return x+','+y+','+z;}
+function get(x,y,z){return blocks[key(x,y,z)]||0;}
+function set(x,y,z,v){if(v)blocks[key(x,y,z)]=v;else delete blocks[key(x,y,z)];}
+// 1 erba 2 terra 3 pietra 4 legno 5 foglie 6 sabbia
+for(var x=0;x<SIZE;x++)for(var z=0;z<SIZE;z++){
+  var hh=h(x,z);
+  for(var y=0;y<=hh;y++){set(x,y,z, y==hh?1 : (y>hh-3?2:3));}
+  if(hh<=3){set(x,hh+1,z,6);set(x,hh,z,6);}
+}
+for(var t=0;t<14;t++){ // alberi
+  var tx=2+Math.floor(Math.random()*(SIZE-4)), tz=2+Math.floor(Math.random()*(SIZE-4)), th=h(tx,tz);
+  if(th<=3||get(tx,th+1,tz))continue;
+  for(var k=1;k<=3;k++)set(tx,th+k,tz,4);
+  for(var dx=-2;dx<=2;dx++)for(var dz=-2;dz<=2;dz++)for(var dy=0;dy<=1;dy++){
+    if(Math.abs(dx)==2&&Math.abs(dz)==2)continue;
+    if(!get(tx+dx,th+3+dy,tz+dz))set(tx+dx,th+3+dy,tz+dz,5);
+  }
+  set(tx,th+5,tz,5);
+}
+// modifiche salvate
+try{
+  var saved=JSON.parse(localStorage.getItem('amethyst-web-world-v1')||'{}');
+  for(var k2 in saved){ if(saved[k2])blocks[k2]=saved[k2]; else delete blocks[k2]; }
+}catch(e){}
+function save(){ try{localStorage.setItem('amethyst-web-world-v1',JSON.stringify(blocks));}catch(e){} }
+var saveT=null; function saveSoon(){clearTimeout(saveT);saveT=setTimeout(save,800);}
+// ---------- grafica ----------
+var canvas=document.getElementById('c');
+var renderer=new THREE.WebGLRenderer({canvas:canvas});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+function resize(){renderer.setSize(innerWidth,innerHeight);}
+addEventListener('resize',resize);resize();
+var scene=new THREE.Scene();
+scene.background=new THREE.Color(0x87ceeb);
+scene.fog=new THREE.Fog(0x87ceeb,20,70);
+var camera=new THREE.PerspectiveCamera(72,innerWidth/innerHeight,0.1,200);
+scene.add(new THREE.AmbientLight(0xffffff,0.75));
+var sun=new THREE.DirectionalLight(0xffffff,0.7);sun.position.set(20,40,10);scene.add(sun);
+var COLORS={1:{t:[0.38,0.72,0.25],s:[0.45,0.32,0.18],b:[0.45,0.32,0.18]},
+  2:{t:[0.45,0.32,0.18],s:[0.45,0.32,0.18],b:[0.45,0.32,0.18]},
+  3:{t:[0.55,0.55,0.58],s:[0.55,0.55,0.58],b:[0.55,0.55,0.58]},
+  4:{t:[0.4,0.27,0.13],s:[0.42,0.29,0.14],b:[0.4,0.27,0.13]},
+  5:{t:[0.16,0.5,0.16],s:[0.16,0.5,0.16],b:[0.16,0.5,0.16]},
+  6:{t:[0.86,0.78,0.55],s:[0.86,0.78,0.55],b:[0.86,0.78,0.55]}};
+var FACES=[{d:[1,0,0],c:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]]},
+ {d:[-1,0,0],c:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]]},
+ {d:[0,1,0],c:[[0,1,1],[1,1,1],[1,1,0],[0,1,0]]},
+ {d:[0,-1,0],c:[[0,0,0],[1,0,0],[1,0,1],[0,0,1]]},
+ {d:[0,0,1],c:[[0,0,1],[1,0,1],[1,1,1],[0,1,1]]},
+ {d:[0,0,-1],c:[[1,0,0],[0,0,0],[0,1,0],[1,1,0]]}];
+var mesh=null;
+function rebuild(){
+  var pos=[],col=[],idx=[],n=0;
+  for(var k in blocks){
+    var p=k.split(','),bx=+p[0],by=+p[1],bz=+p[2],bt=blocks[k],cc=COLORS[bt];if(!cc)continue;
+    for(var f=0;f<6;f++){
+      var F=FACES[f];
+      if(get(bx+F.d[0],by+F.d[1],bz+F.d[2]))continue;
+      var shade=(f==2)?1:(f==3?0.55:0.8);
+      var c=(f==2)?cc.t:((f==3)?cc.b:cc.s);
+      for(var vi=0;vi<4;vi++){
+        pos.push(bx+F.c[vi][0],by+F.c[vi][1],bz+F.c[vi][2]);
+        col.push(c[0]*shade,c[1]*shade,c[2]*shade);
+      }
+      idx.push(n,n+1,n+2,n,n+2,n+3);n+=4;
+    }
+  }
+  var g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
+  g.setIndex(idx);g.computeVertexNormals();
+  var m=new THREE.Mesh(g,new THREE.MeshLambertMaterial({vertexColors:true}));
+  if(mesh){scene.remove(mesh);mesh.geometry.dispose();mesh.material.dispose();}
+  mesh=m;scene.add(m);
+  document.getElementById('info').textContent='⛏️ '+Object.keys(blocks).length+' blocchi · Amethyst Web';
+}
+rebuild();
+// ---------- giocatore ----------
+var P={x:SIZE/2+0.5,y:12,z:SIZE/2+0.5,vx:0,vy:0,vz:0,yaw:0,pitch:-0.2,onG:false};
+var keys={};
+addEventListener('keydown',function(e){keys[e.code]=true;if(e.code>'Digit0'&&e.code<'Digit7')sel(+e.code.slice(5)-1);if(e.code==='Space')e.preventDefault();});
+addEventListener('keyup',function(e){keys[e.code]=false;});
+function solid(x,y,z){return !!get(Math.floor(x),Math.floor(y),Math.floor(z));}
+function collide(){
+  var r=0.3,H=1.8;
+  // Y
+  P.y+=P.vy;
+  if(P.vy<0){
+    if(solid(P.x-r,P.y,P.z-r)||solid(P.x+r,P.y,P.z-r)||solid(P.x-r,P.y,P.z+r)||solid(P.x+r,P.y,P.z+r)){
+      P.y=Math.floor(P.y)+1;P.vy=0;P.onG=true;
+    } else P.onG=false;
+  } else if(P.vy>0){
+    var top=P.y+H;
+    if(solid(P.x-r,top,P.z-r)||solid(P.x+r,top,P.z-r)||solid(P.x-r,top,P.z+r)||solid(P.x+r,top,P.z+r)){
+      P.y=Math.ceil(top)-H-0.001;P.vy=0;
+    }
+  }
+  // X
+  P.x+=P.vx;
+  if(solid(P.x+(P.vx>0?r:-r),P.y+0.3,P.z-r)||solid(P.x+(P.vx>0?r:-r),P.y+0.3,P.z+r)||solid(P.x+(P.vx>0?r:-r),P.y+1.5,P.z)){
+    P.x-=P.vx;P.vx=0;
+  }
+  // Z
+  P.z+=P.vz;
+  if(solid(P.x-r,P.y+0.3,P.z+(P.vz>0?r:-r))||solid(P.x+r,P.y+0.3,P.z+(P.vz>0?r:-r))||solid(P.x,P.y+1.5,P.z+(P.vz>0?r:-r))){
+    P.z-=P.vz;P.vz=0;
+  }
+  if(P.y<-10){P.y=12;P.vy=0;} // caduto dal mondo
+}
+// ---------- raycast voxel (DDA) ----------
+function raycast(maxD){
+  var dx=-Math.sin(P.yaw)*Math.cos(P.pitch),dy=Math.sin(P.pitch),dz=-Math.cos(P.yaw)*Math.cos(P.pitch);
+  var x=P.x,y=P.y+1.6,z=P.z;
+  var ix=Math.floor(x),iy=Math.floor(y),iz=Math.floor(z);
+  var sx=dx>0?1:-1,sy=dy>0?1:-1,sz=dz>0?1:-1;
+  var tdx=Math.abs(1/(dx||1e-8)),tdy=Math.abs(1/(dy||1e-8)),tdz=Math.abs(1/(dz||1e-8));
+  var tmx=(sx>0?(ix+1-x):(x-ix))*tdx,tmy=(sy>0?(iy+1-y):(y-iy))*tdy,tmz=(sz>0?(iz+1-z):(z-iz))*tdz;
+  var nx=0,ny=0,nz=0,t=0;
+  for(var i=0;i<100;i++){
+    if(tmx<tmy&&tmx<tmz){ix+=sx;t=tmx;tmx+=tdx;nx=-sx;ny=0;nz=0;}
+    else if(tmy<tmz){iy+=sy;t=tmy;tmy+=tdy;nx=0;ny=-sy;nz=0;}
+    else{iz+=sz;t=tmz;tmz+=tdz;nx=0;ny=0;nz=-sz;}
+    if(t>maxD)return null;
+    if(get(ix,iy,iz))return {x:ix,y:iy,z:iz,nx:nx,ny:ny,nz:nz};
+  }
+  return null;
+}
+function doBreak(){var h2=raycast(6);if(h2){set(h2.x,h2.y,h2.z,0);rebuild();saveSoon();}}
+function doPlace(){var h2=raycast(6);if(h2){var nx=h2.x+h2.nx,ny=h2.y+h2.ny,nz=h2.z+h2.nz;if(!get(nx,ny,nz)){set(nx,ny,nz,cur());rebuild();saveSoon();}}}
+// ---------- inventario ----------
+var INV=[{n:'Erba',c:'#61b841'},{n:'Terra',c:'#73492e'},{n:'Pietra',c:'#8c8c8f'},{n:'Legno',c:'#6b4a23'},{n:'Foglie',c:'#297f29'},{n:'Sabbia',c:'#dbca8c'}];
+var SEL=0;function cur(){return SEL+1;}
+var hb=document.getElementById('hotbar');
+INV.forEach(function(b,i){
+  var d=document.createElement('div');d.className='slot'+(i==0?' sel':'');d.textContent=(i+1)+' '+b.n;d.style.background=b.c;
+  d.onclick=function(){sel(i);};hb.appendChild(d);
+});
+function sel(i){SEL=i;var s=hb.children;for(var j=0;j<s.length;j++)s[j].classList.toggle('sel',j==i);}
+// ---------- input mouse/touch ----------
+var locked=false;
+canvas.addEventListener('click',function(){ if(!locked&&canvas.requestPointerLock)canvas.requestPointerLock(); });
+document.addEventListener('pointerlockchange',function(){locked=document.pointerLockElement===canvas;});
+document.addEventListener('mousemove',function(e){
+  if(!locked)return;
+  P.yaw-=e.movementX*0.0025;P.pitch-=e.movementY*0.0025;
+  P.pitch=Math.max(-1.5,Math.min(1.5,P.pitch));
+});
+canvas.addEventListener('mousedown',function(e){
+  if(!locked&&canvas.requestPointerLock){canvas.requestPointerLock();return;}
+  if(e.button===0)doBreak();else doPlace();
+});
+document.addEventListener('contextmenu',function(e){e.preventDefault();});
+// touch: joystick sx, trascina dx per guardare
+var joy=document.getElementById('joy'),stick=document.getElementById('stick');
+var joyOn=false,jx=0,jy=0,lookId=null,lx=0,ly=0;
+if('ontouchstart' in window)joy.style.display='block';
+addEventListener('touchstart',function(e){
+  for(var i=0;i<e.changedTouches.length;i++){
+    var t=e.changedTouches[i];
+    if(t.clientX<innerWidth/2&&t.clientY>innerHeight/2-140){joyOn=t.identifier;jx=0;jy=0;}
+    else{lookId=t.identifier;lx=t.clientX;ly=t.clientY;}
+  }
+},{passive:false});
+addEventListener('touchmove',function(e){
+  e.preventDefault();
+  for(var i=0;i<e.changedTouches.length;i++){
+    var t=e.changedTouches[i];
+    if(t.identifier===joyOn){jx=Math.max(-1,Math.min(1,(t.clientX-(10+60))/50));jy=Math.max(-1,Math.min(1,(t.clientY-(innerHeight-74-60))/50));stick.style.left=(35+jx*30)+'px';stick.style.top=(35+jy*30)+'px';}
+    else if(t.identifier===lookId){P.yaw-=(t.clientX-lx)*0.006;P.pitch-=(t.clientY-ly)*0.006;P.pitch=Math.max(-1.5,Math.min(1.5,P.pitch));lx=t.clientX;ly=t.clientY;}
+  }
+},{passive:false});
+addEventListener('touchend',function(e){
+  for(var i=0;i<e.changedTouches.length;i++){
+    var t=e.changedTouches[i];
+    if(t.identifier===joyOn){joyOn=false;jx=jy=0;stick.style.left='35px';stick.style.top='35px';}
+    if(t.identifier===lookId)lookId=null;
+  }
+});
+document.getElementById('bJump').onclick=function(){if(P.onG)P.vy=0.13;};
+document.getElementById('bBreak').onclick=doBreak;
+document.getElementById('bPlace').onclick=doPlace;
+// ---------- loop ----------
+document.getElementById('go').onclick=function(){
+  document.getElementById('menu').style.display='none';
+  if(!('ontouchstart' in window)&&canvas.requestPointerLock)canvas.requestPointerLock();
+};
+var last=performance.now();
+function loop(now){
+  requestAnimationFrame(loop);
+  var dt=Math.min(0.05,(now-last)/1000);last=now;
+  var f=0,s=0;
+  if(keys.KeyW||keys.ArrowUp)f+=1;if(keys.KeyS||keys.ArrowDown)f-=1;
+  if(keys.KeyD||keys.ArrowRight)s+=1;if(keys.KeyA||keys.ArrowLeft)s-=1;
+  if(joyOn!==false){f-=jy;s+=jx;}
+  var sp=6*Math.min(1,Math.hypot(f,s)||0);
+  var a=Math.atan2(f,s||0.0001);
+  // direzione rispetto a yaw
+  var sin=Math.sin(P.yaw),cos=Math.cos(P.yaw);
+  P.vx=(-sin*f+cos*s)*0; // ricalcolo sotto
+  var mx=(-sin*f+cos*s),mz=(-cos*f-sin*s);
+  var l=Math.hypot(mx,mz)||1;
+  P.vx=mx/l*sp*dt*8*0.12*5/5; P.vx=mx/l*sp*dt;
+  P.vz=mz/l*sp*dt;
+  if(f==0&&s==0&&joyOn===false){P.vx=0;P.vz=0;}
+  P.vy-=0.35*dt*3.2;
+  if(P.vy<-0.5)P.vy=-0.5;
+  if((keys.Space)&&P.onG)P.vy=0.13;
+  P.onG=false;
+  // integrazione semplice a passi
+  var steps=3;
+  for(var i=0;i<steps;i++){var ox=P.vx/steps,oz=P.vz/steps,oy=P.vy/steps;P.vx=ox;P.vz=oz;P.vy=oy;collide();}
+  P.vx=0;P.vz=0;
+  camera.position.set(P.x,P.y+1.6,P.z);
+  camera.rotation.order='YXZ';camera.rotation.y=P.yaw;camera.rotation.x=P.pitch;
+  renderer.render(scene,camera);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body></html>"""
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(
+        prog="amethyst-web",
+        description="Amethyst Web: apri il browser e gioca, senza installare nulla.",
+    )
+    p.add_argument("command", nargs="?", default="web",
+                   help="usa 'web' per avviare (cosi' funziona anche: amethyst web)")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT, help="porta locale (default 8080)")
+    p.add_argument("--host", default=DEFAULT_HOST, help="host di bind (default 127.0.0.1)")
+    p.add_argument("--no-open", action="store_true", help="non aprire il browser in automatico")
+    p.add_argument("--version", action="store_true", help="mostra versione ed esci")
+    return p.parse_args(argv)
+
+
+def find_free_port(host, start, tries=20):
+    for port in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind((host, port))
+                return port
+            except OSError:
+                continue
+    return start
+
+
+def try_launch_app():
+    """Prova ad aprire l'app Amethyst installata (solo Android). Ritorna (ok, messaggio)."""
+    cmds = [
+        ["am", "start", "-n", f"{PKG_RELEASE}/{MAIN_ACTIVITY}"],
+        ["am", "start", "-n", f"{PKG_DEBUG}/{MAIN_ACTIVITY}"],
+    ]
+    if shutil.which("am") is None and not shutil.which("termux-open-url"):
+        return False, "Comando 'am' non trovato: non sei su Android. Apri manualmente l'app Amethyst."
+    for cmd in cmds:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            out = (r.stdout + r.stderr).lower()
+            if r.returncode == 0 and "error" not in out:
+                return True, "Amethyst Launcher aperto! Premi Play per la versione completa."
+        except FileNotFoundError:
+            continue
+        except Exception as e:  # noqa: BLE001
+            return False, f"Avvio non riuscito ({e}). Apri manualmente l'app Amethyst."
+    return False, "App Amethyst non trovata sul dispositivo. Scarica prima l'APK."
+
+
+def open_browser(url):
+    if shutil.which("termux-open-url"):
+        try:
+            subprocess.Popen(["termux-open-url", url])
+            return True
+        except Exception:  # noqa: BLE001
+            pass
+    if shutil.which("am"):
+        try:
+            subprocess.Popen(["am", "start", "-a", "android.intent.action.VIEW",
+                              "-d", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        if webbrowser.open(url):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    for opener in (["xdg-open", url], ["open", url], ["cmd", "/c", "start", url]):
+        try:
+            subprocess.Popen(opener, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
+class Handler(BaseHTTPRequestHandler):
+    url = "http://127.0.0.1:8080"
+
+    def log_message(self, fmt, *args):
+        sys.stdout.write("  [%s] %s\n" % (self.command, self.path))
+
+    def _send(self, code, body, ctype="text/html; charset=utf-8"):
+        data = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):  # noqa: N802
+        path = urlparse(self.path).path
+        if path in ("/", "/index.html"):
+            self._send(200, PAGE_HOME.replace("__URL__", self.url))
+        elif path == "/play":
+            self._send(200, PAGE_PLAY)
+        elif path == "/launcher":
+            self._send(200, PAGE_LAUNCHER)
+        elif path == "/api/status":
+            self._send(200, json.dumps({
+                "app": APP_NAME, "version": VERSION, "status": "ok",
+                "url": self.url, "game": "clone voxel open-source nel browser (nessun asset Mojang)",
+                "full_game": "Minecraft JE originale via app Amethyst (richiede gioco acquistato)",
+            }, ensure_ascii=False), "application/json; charset=utf-8")
+        elif path == "/api/launch":
+            ok, message = try_launch_app()
+            self._send(200, json.dumps({"ok": ok, "message": message}, ensure_ascii=False),
+                       "application/json; charset=utf-8")
+        elif path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+        else:
+            self._send(404, "<h1>404 — pagina non trovata</h1><p><a href='/'>Torna al pannello</a></p>")
+
+
+def main(argv=None):
+    args = parse_args(argv or sys.argv[1:])
+    if args.version:
+        print(f"{APP_NAME} {VERSION}")
+        return 0
+    if args.command not in ("web", "serve", "start"):
+        print(f"Comando sconosciuto: {args.command}\nUso: amethyst-web [web] [--port PORTA] [--no-open]")
+        return 1
+
+    host = args.host
+    port = find_free_port(host, args.port)
+    if port != args.port:
+        print(f"⚠️  Porta {args.port} occupata → uso la {port}.")
+
+    Handler.url = f"http://{host}:{port}"
+    server = HTTPServer((host, port), Handler)
+    play_url = Handler.url + "/play"
+
+    print(f"\n  💜 {APP_NAME} {VERSION}")
+    print(f"  ➜ Pannello: {Handler.url}")
+    print(f"  ➜ GIOCA ORA nel browser: {play_url}")
+    print("  ➜ Premi CTRL+C per fermare.\n")
+
+    if not args.no_open:
+        threading.Timer(0.8, functools.partial(open_browser, play_url)).start()
+        print("  🌐 Apro il browser sul gioco...")
+        time.sleep(0.1)
+    else:
+        print("  (apertura browser disattivata — apri l'URL a mano)")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  👋 Server fermato. Alla prossima!")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
