@@ -64,6 +64,7 @@ PAGE_HOME = """<!DOCTYPE html>
 <p class="sub">Gioca subito dal browser, senza installare nulla.<br>Clone voxel open-source dimostrativo (non Minecraft Mojang).</p>
 <div class="url">__URL__/play</div>
 <a class="btn play" href="/play">▶ &nbsp;Gioca ora nel browser</a>
+<a class="btn ghost" href="https://classic.minecraft.net/">🎮 Minecraft Classic originale (Mojang, gratis)</a>
 <div class="row">
 <a class="btn ghost" href="/launcher">🚀 Minecraft originale (app)</a>
 <a class="btn ghost" href="/api/status">📡 Stato JSON</a>
@@ -161,7 +162,9 @@ Il Minecraft originale richiede gioco acquistato + app (vedi <a href="/launcher"
 <div class="warn">🌐 Serve internet al primo avvio (Three.js da CDN). Mondo salvato in questo browser.</div>
 <p>PC: <kbd>WASD</kbd> muovi · mouse guarda · <kbd>Spazio</kbd> salta · click rompe · tasto destro piazza · <kbd>1-6</kbd> blocchi<br>
 📱 Mobile: joystick + trascina per guardare + tasti ⤒ ⛏ 🧱</p>
-<button id="go">▶ GIOCA ORA</button>
+<button id="go">▶ GIOCA ORA (clone demo)</button>
+<a id="go2" href="https://classic.minecraft.net/" target="_blank" rel="noopener" style="display:block;background:#3b8526;color:#fff;border-radius:10px;padding:14px 20px;font-size:16px;font-weight:800;width:100%;text-decoration:none;margin-top:8px">🎮 MINECRAFT CLASSIC — originale Mojang, gratis</a>
+<p style="font-size:12px">Classic = Minecraft vero (creativa 2009) nel browser, gratis e senza installare. Il gioco completo Java richiede app + licenza (vedi Gioco completo).</p>
 </div></div>
 <script>
 (function(){
